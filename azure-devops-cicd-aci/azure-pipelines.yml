@@ -1,0 +1,80 @@
+# Azure Pipelines: Build, Test, Push to ACR, Deploy to ACI
+trigger:
+  branches: { include: [ main ] }
+pr:
+  branches: { include: [ main ] }
+
+variables:
+  imageName: 'azure-devops-cicd-aci'
+  acrName: 'YOUR_ACR_NAME'
+  acrLoginServer: '$(acrName).azurecr.io'
+  resourceGroup: 'YOUR_RESOURCE_GROUP'
+  aciName: 'YOUR_ACI_NAME'
+  location: 'eastus'
+  tag: '$(Build.BuildId)'
+
+pool: { vmImage: 'ubuntu-latest' }
+
+stages:
+- stage: Build_Test
+  jobs:
+  - job: UnitTests
+    steps:
+    - task: UsePythonVersion@0
+      inputs: { versionSpec: '3.11' }
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest
+        pytest -q
+      displayName: 'Install deps and run tests'
+
+- stage: Build_Image
+  dependsOn: Build_Test
+  jobs:
+  - job: DockerBuild
+    steps:
+    - task: Docker@2
+      displayName: 'Build image'
+      inputs:
+        repository: '$(acrLoginServer)/$(imageName)'
+        command: 'build'
+        Dockerfile: 'Dockerfile'
+        tags: |
+          $(tag)
+
+- stage: Push_Image
+  dependsOn: Build_Image
+  jobs:
+  - job: DockerPush
+    steps:
+    - task: Docker@2
+      displayName: 'Login to ACR'
+      inputs:
+        command: 'login'
+        containerRegistry: 'YOUR_AZURE_SERVICE_CONNECTION'
+    - task: Docker@2
+      displayName: 'Push image'
+      inputs:
+        repository: '$(acrLoginServer)/$(imageName)'
+        command: 'push'
+        tags: |
+          $(tag)
+
+- stage: Deploy_ACI
+  dependsOn: Push_Image
+  jobs:
+  - job: Deploy
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Deploy ACI using Bicep'
+      inputs:
+        azureSubscription: 'YOUR_AZURE_SERVICE_CONNECTION'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az group create -n $(resourceGroup) -l $(location)
+          az deployment group create             --resource-group $(resourceGroup)             --template-file iac/main.bicep             --parameters containerName=$(aciName)                          registryLoginServer=$(acrLoginServer)                          imageName=$(acrLoginServer)/$(imageName):$(tag)                          registryUsername=$(ACR_USERNAME)                          registryPassword=$(ACR_PASSWORD)                          appEnv=prod                          appVersion=$(tag)
+      env:
+        ACR_USERNAME: $(ACR_USERNAME)
+        ACR_PASSWORD: $(ACR_PASSWORD)
